@@ -1,0 +1,9 @@
+Flask
+libsql-client>=0.3.0
+configparser
+requests
+pandas
+flask-cors
+pyjwt
+python-dotenv
+werkzeug
