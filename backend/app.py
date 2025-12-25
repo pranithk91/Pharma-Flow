@@ -213,6 +213,186 @@ def keep_alive_service():
     ping_thread.start()
     print(f"[{datetime.now().isoformat()}] Keep-alive service started (interval: {KEEP_ALIVE_INTERVAL}s)")
 
+# def ddmmyyyy_to_yyyymmdd(date_str):
+#     try:
+#         d, m, y = date_str.split("-")
+#         return f"{y}-{m}-{d}"
+#     except:
+#         return date_str
+    
+@app.route("/api/view-sales", methods=["GET", "POST"])
+@token_required
+def view_sales_api(current_user):
+    # if "username" not in session:
+    #     return jsonify({"error": "Unauthorized"}), 401
+
+    from db_connect import client
+
+    # -----------------------------
+    # DEFAULT DATE
+    # -----------------------------
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # -----------------------------
+    # GET FILTERS (POST or GET)
+    # -----------------------------
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+
+        selected_date = data.get("date", today)
+        pname = data.get("pname", "").strip()
+        uhid = data.get("uhid", "").strip()
+        invoice_id = data.get("invoiceid", "").strip()
+        phone = data.get("phonenum", "").strip()
+        page = int(data.get("page", 1))
+    else:
+        selected_date = request.args.get("date", today)
+        pname = request.args.get("pname", "").strip()
+        uhid = request.args.get("uhid", "").strip()
+        invoice_id = request.args.get("invoiceid", "").strip()
+        phone = request.args.get("phonenum", "").strip()
+        page = int(request.args.get("page", 1))
+
+
+    # selected_date = ddmmyyyy_to_yyyymmdd(selected_date)
+    # -----------------------------
+    # BASE QUERY
+    # -----------------------------
+    query = "SELECT * FROM vw_dailyPharmacyDetailsDemo WHERE 1=1"
+    params = []
+
+    if selected_date:
+        query += " AND substr(timestamp, 1, 10) = ?"
+        params.append(selected_date)
+
+    if pname:
+        query += " AND PName LIKE ?"
+        params.append(f"%{pname}%")
+
+    if uhid:
+        query += " AND UHId LIKE ?"
+        params.append(f"%{uhid}%")
+
+    if invoice_id:
+        query += " AND InvoiceId LIKE ?"
+        params.append(f"%{invoice_id}%")
+
+    if phone:
+        query += " AND PhoneNo LIKE ?"
+        params.append(f"%{phone}%")
+
+    query += " ORDER BY timestamp DESC, InvoiceId"
+
+    # -----------------------------
+    # FETCH DATA
+    # -----------------------------
+    try:
+        result = client.execute(query, params)
+        sales_data = result.rows
+    except Exception as e:
+        print("❌ Sales fetch error:", e)
+        sales_data = []
+
+    # -----------------------------
+    # GROUP BY INVOICE
+    # -----------------------------
+    grouped_invoices = {}
+    total_btotal = 0.0
+
+    for row in sales_data:
+        inv_id = row[11]
+
+        grouped_invoices.setdefault(inv_id, []).append(list(row))
+
+        if row[8]:
+            try:
+                total_btotal += float(row[8])
+            except:
+                pass
+
+    # -----------------------------
+    # PAGINATION
+    # -----------------------------
+    items_per_page = 10
+    all_items = list(grouped_invoices.items())
+
+    total_items = len(all_items)
+    total_pages = max((total_items + items_per_page - 1) // items_per_page, 1)
+
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * items_per_page
+    end = start + items_per_page
+
+    paginated_invoices = dict(all_items[start:end])
+
+    pagination = {
+        "page": page,
+        "pages": total_pages,
+        "total": total_items,
+        "has_prev": page > 1,
+        "has_next": page < total_pages
+    }
+
+    # -----------------------------
+    # SUMMARY
+    # -----------------------------
+    summary_query = """
+        SELECT 
+            COUNT(DISTINCT InvoiceId),
+            SUM(CASE WHEN PaymentMode = 'Cash' THEN TotalAmount ELSE 0 END),
+            SUM(CASE WHEN PaymentMode = 'UPI' THEN TotalAmount ELSE 0 END)
+        FROM MedicineInvoices
+        WHERE DATE(InvoiceDate) = ?
+    """
+
+    try:
+        s = client.execute(summary_query, [selected_date]).rows[0]
+        summary = {
+            "total_invoices": s[0] or 0,
+            "cash_total": s[1] or 0,
+            "upi_total": s[2] or 0,
+            "total_btotal": round(total_btotal, 2)
+        }
+    except:
+        summary = {
+            "total_invoices": 0,
+            "cash_total": 0,
+            "upi_total": 0,
+            "total_btotal": round(total_btotal, 2)
+        }
+
+    # -----------------------------
+    # LABEL
+    # -----------------------------
+    label = f"Showing data for {selected_date}"
+
+    if pname:
+        label = f"Showing data for patient name - {pname}"
+    elif uhid:
+        label = f"Showing data for UHID - {uhid}"
+    elif invoice_id:
+        label = f"Showing data for Invoice ID - {invoice_id}"
+    elif phone:
+        label = f"Showing data for Phone - {phone}"
+
+    # -----------------------------
+    # FINAL RESPONSE
+    # -----------------------------
+    return jsonify({
+        "grouped_invoices": paginated_invoices,
+        "summary": summary,
+        "pagination": pagination,
+        "filters": {
+            "date": selected_date,
+            "pname": pname,
+            "uhid": uhid,
+            "invoiceid": invoice_id,
+            "phonenum": phone
+        },
+        "label": label
+    })
+
 # --- Application Entry Point ---
 
 if __name__ == "__main__" and USE_SQLITE == 1:
